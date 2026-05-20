@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CRM</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif; }
+input, textarea, select, button { font-family: inherit; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 3px; }
+.dragging { opacity: 0.4; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ── Storage ───────────────────────────────────────────────────────────────────
+const db = {
+  async get(key) {
+    try {
+      if (window.storage) { const r = await window.storage.get(key); return r ? JSON.parse(r.value) : null; }
+      const v = localStorage.getItem("crm_" + key); return v ? JSON.parse(v) : null;
+    } catch { return null; }
+  },
+  async set(key, val) {
+    try {
+      if (window.storage) { await window.storage.set(key, JSON.stringify(val)); return; }
+      localStorage.setItem("crm_" + key, JSON.stringify(val));
+    } catch {}
+  }
+};
+
+const uid = () => Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-4);
+
+const INIT_STAGES = [
+  {id:"s1",name:"Nowy",color:"#007AFF",order:0},
+  {id:"s2",name:"Kontakt",color:"#34C759",order:1},
+  {id:"s3",name:"Oferta",color:"#FF9500",order:2},
+  {id:"s4",name:"Negocjacje",color:"#FF3B30",order:3},
+  {id:"s5",name:"Wygrany",color:"#30D158",order:4},
+  {id:"s6",name:"Przegrany",color:"#8E8E93",order:5},
+];
+const COLORS = ["#007AFF","#34C759","#FF9500","#FF3B30","#30D158","#8E8E93","#AF52DE","#FF2D55","#5AC8FA","#FFCC00","#FF6B35","#00C7BE"];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function gcalUrl(ev, lead) {
+  const d = (ev.date||"").replace(/-/g,"");
+  if (!d || !ev.title) return null;
+  let dates;
+  if (ev.time) {
+    const t = ev.time.replace(":","");
+    const [h,m] = ev.time.split(":").map(Number);
+    const eh = String((h+1)%24).padStart(2,"0");
+    const em = String(m).padStart(2,"0");
+    dates = `${d}T${t}00/${d}T${eh}${em}00`;
+  } else {
+    const nd = new Date(ev.date); nd.setDate(nd.getDate()+1);
+    dates = `${d}/${nd.toISOString().slice(0,10).replace(/-/g,"")}`;
+  }
+  const name = [lead.firstName,lead.lastName].filter(Boolean).join(" ");
+  const details = [ev.description, name&&`Lead: ${name}`, lead.company&&`Firma: ${lead.company}`].filter(Boolean).join("\n");
+  const p = new URLSearchParams({action:"TEMPLATE",text:ev.title,dates,details,location:ev.location||""});
+  return `https://calendar.google.com/calendar/render?${p}`;
+}
+function dateFmt(s) {
+  if (!s) return "";
+  try { return new Date(s+"T12:00:00").toLocaleDateString("pl-PL",{day:"numeric",month:"short",year:"numeric"}); } catch { return s; }
+}
+function inits(a,b) { return ((a?.[0]||"")+(b?.[0]||"")).toUpperCase()||"?"; }
+function fullName(l) { return [l?.firstName,l?.lastName].filter(Boolean).join(" ")||l?.company||"Bez nazwy"; }
+function fmtVal(v) {
+  const n = Number(v);
+  if (!v && v !== 0) return "";
+  return n.toLocaleString("pl-PL",{minimumFractionDigits:2,maximumFractionDigits:2}) + " zl";
+}
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+const LT = {bg:"#F5F5F7",card:"#FFFFFF",border:"rgba(0,0,0,0.09)",text:"#1D1D1F",sec:"#6E6E73",accent:"#007AFF",accentBg:"rgba(0,122,255,0.1)",input:"#F2F2F4",col:"#EBEBED",colHi:"#DCDCE0",nav:"rgba(255,255,255,0.97)",green:"#30D158",greenBg:"rgba(48,209,88,0.1)"};
+const DT = {bg:"#161618",card:"#1E1E20",border:"rgba(255,255,255,0.08)",text:"#F2F2F7",sec:"#8E8E93",accent:"#0A84FF",accentBg:"rgba(10,132,255,0.15)",input:"#2C2C2E",col:"#1C1C1E",colHi:"#2C2C2E",nav:"rgba(22,22,24,0.97)",green:"#30D158",greenBg:"rgba(48,209,88,0.12)"};
+
+// ── Primitives ────────────────────────────────────────────────────────────────
+function Inp({value,onChange,placeholder,type="text",rows,c,min}) {
+  const s = {width:"100%",padding:"8px 12px",borderRadius:8,border:`0.5px solid ${c.border}`,background:c.input,color:c.text,fontSize:14,outline:"none",fontFamily:"inherit",resize:"vertical",boxSizing:"border-box"};
+  if (rows) return <textarea rows={rows} style={s} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}/>;
+  return <input type={type} min={min} style={s} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}/>;
+}
+function Btn({children,onClick,variant="default",small,disabled,full,c}) {
+  const base = {padding:small?"5px 12px":"8px 16px",borderRadius:8,fontSize:small?13:14,fontWeight:500,cursor:disabled?"not-allowed":"pointer",border:"none",fontFamily:"inherit",opacity:disabled?0.4:1,width:full?"100%":undefined,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:4,transition:"opacity 0.15s"};
+  const v = {
+    default:{background:c.input,color:c.text,border:`0.5px solid ${c.border}`},
+    primary:{background:c.accent,color:"#fff"},
+    success:{background:c.green,color:"#fff"},
+    danger:{background:"rgba(255,59,48,0.12)",color:"#FF3B30"},
+    ghost:{background:"transparent",color:c.sec}
+  };
+  return <button style={{...base,...v[variant]}} onClick={onClick} disabled={disabled}>{children}</button>;
+}
+function Avatar({f,l,size=32,color="#007AFF"}) {
+  return <div style={{width:size,height:size,borderRadius:size,background:color+"22",color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*0.35,fontWeight:600,flexShrink:0,letterSpacing:-0.5}}>{inits(f,l)}</div>;
+}
+function SectionLabel({children,c}) {
+  return <div style={{fontSize:11,fontWeight:600,color:c.sec,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>{children}</div>;
+}
+function Card({children,c,style}) {
+  return <div style={{background:c.card,borderRadius:12,border:`0.5px solid ${c.border}`,...style}}>{children}</div>;
+}
+function StageBadge({stage}) {
+  if (!stage) return null;
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:12,fontWeight:500,padding:"2px 8px",borderRadius:20,background:stage.color+"22",color:stage.color}}><span style={{width:5,height:5,borderRadius:3,background:stage.color,display:"inline-block"}}/>{stage.name}</span>;
+}
+function WonBadge({c}) {
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:12,fontWeight:600,padding:"2px 10px",borderRadius:20,background:c.greenBg,color:c.green}}>Sukces</span>;
+}
+
+// ── Delete confirmation (icon and text variants) ─────────────────────────────
+function DeleteBtn({onConfirm, c, variant="icon", warning="Usunac?", confirmLabel="Tak", cancelLabel="Nie", strongWarning}) {
+  const [confirm, setConfirm] = useState(false);
+  useEffect(()=>{
+    if (!confirm) return;
+    const t = setTimeout(()=>setConfirm(false), 5000);
+    return ()=>clearTimeout(t);
+  },[confirm]);
+  if (confirm) {
+    return (
+      <span style={{display:"inline-flex",gap:4,alignItems:"center",flexShrink:0}} onClick={e=>e.stopPropagation()}>
+        <span style={{fontSize:12,color:"#FF3B30",fontWeight:500,marginRight:2}}>{strongWarning||warning}</span>
+        <Btn c={c} variant="danger" small onClick={()=>{onConfirm();setConfirm(false);}}>{confirmLabel}</Btn>
+        <Btn c={c} small onClick={()=>setConfirm(false)}>{cancelLabel}</Btn>
+      </span>
+    );
+  }
+  if (variant==="icon") {
+    return <button onClick={e=>{e.stopPropagation();setConfirm(true);}} style={{background:"none",border:"none",cursor:"pointer",color:c.sec,fontSize:18,lineHeight:1,padding:"2px 6px",borderRadius:6,flexShrink:0}}>&#x2715;</button>;
+  }
+  return <Btn c={c} variant="danger" small onClick={()=>setConfirm(true)}>Usun</Btn>;
+}
+
+// Double-confirmation for bulk clear actions
+function ClearAllBtn({onConfirm, c, label, firstWarning, secondWarning}) {
+  const [step, setStep] = useState(0); // 0=idle, 1=first confirm, 2=second confirm
+  useEffect(()=>{
+    if (step===0) return;
+    const t = setTimeout(()=>setStep(0), 6000);
+    return ()=>clearTimeout(t);
+  },[step]);
+
+  if (step===0) {
+    return <Btn c={c} variant="danger" small onClick={()=>setStep(1)}>{label}</Btn>;
+  }
+  if (step===1) {
+    return (
+      <span style={{display:"inline-flex",gap:6,alignItems:"center"}}>
+        <span style={{fontSize:12,color:"#FF3B30",fontWeight:500}}>{firstWarning}</span>
+        <Btn c={c} variant="danger" small onClick={()=>setStep(2)}>Tak</Btn>
+        <Btn c={c} small onClick={()=>setStep(0)}>Nie</Btn>
+      </span>
+    );
+  }
+  return (
+    <span style={{display:"inline-flex",gap:6,alignItems:"center"}}>
+      <span style={{fontSize:12,color:"#FF3B30",fontWeight:600}}>{secondWarning||"Na pewno? Tego nie cofniesz!"}</span>
+      <Btn c={c} variant="danger" small onClick={()=>{onConfirm();setStep(0);}}>Tak, usun</Btn>
+      <Btn c={c} small onClick={()=>setStep(0)}>Anuluj</Btn>
+    </span>
+  );
+}
+
+// ── Add Lead Modal ─────────────────────────────────────────────────────────────
+function AddLeadModal({stage,contacts,onAdd,onAddContact,onClose,c}) {
+  const [mode,setMode] = useState(contacts.length>0?"search":"new");
+  const [q,setQ] = useState("");
+  const [f,setF] = useState({firstName:"",lastName:"",company:"",email:"",phone:""});
+  const upd = k => v => setF(p=>({...p,[k]:v}));
+  const filtered = q.trim()
+    ? contacts.filter(ct=>[ct.firstName,ct.lastName,ct.company,ct.email,ct.phone].some(x=>x?.toLowerCase().includes(q.toLowerCase())))
+    : contacts.slice(0,10);
+  const pickContact = ct => {
+    onAdd({firstName:ct.firstName||"",lastName:ct.lastName||"",company:ct.company||"",email:ct.email||"",phone:ct.phone||"",stageId:stage.id,contactId:ct.id});
+    onClose();
+  };
+  const saveNew = () => {
+    if (!f.firstName&&!f.lastName&&!f.company) return;
+    const nc = onAddContact({...f});
+    onAdd({...f,stageId:stage.id,contactId:nc.id});
+    onClose();
+  };
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.4)"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:c.card,borderRadius:16,padding:20,width:340,maxWidth:"92vw",maxHeight:"82vh",display:"flex",flexDirection:"column",border:`0.5px solid ${c.border}`,boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+          <span style={{fontSize:15,fontWeight:600,color:c.text}}>Nowy lead &mdash; {stage.name}</span>
+          <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",color:c.sec,fontSize:20,width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:6}}>&#x2715;</button>
+        </div>
+        <div style={{display:"flex",gap:4,marginBottom:14,background:c.input,borderRadius:9,padding:3}}>
+          {[["search","Z bazy"],["new","Nowy kontakt"]].map(([id,label])=>(
+            <button key={id} onClick={()=>setMode(id)} style={{flex:1,padding:"6px 0",borderRadius:7,fontSize:13,fontWeight:mode===id?500:400,border:"none",cursor:"pointer",fontFamily:"inherit",background:mode===id?c.card:"transparent",color:mode===id?c.text:c.sec,transition:"all 0.15s"}}>{label}</button>
+          ))}
+        </div>
+        {mode==="search" && (
+          <div style={{display:"flex",flexDirection:"column",gap:8,overflow:"hidden"}}>
+            <Inp c={c} value={q} onChange={setQ} placeholder="Szukaj po nazwisku, firmie..."/>
+            <div style={{overflowY:"auto",maxHeight:300,display:"flex",flexDirection:"column",gap:4}}>
+              {filtered.length===0 && (
+                <div style={{padding:"24px 0",textAlign:"center",fontSize:13,color:c.sec}}>
+                  {q?"Brak wynikow":"Brak kontaktow w bazie"}
+                  <div style={{marginTop:8}}><Btn c={c} small onClick={()=>setMode("new")}>Dodaj nowy kontakt</Btn></div>
+                </div>
+              )}
+              {filtered.map(ct=>(
+                <div key={ct.id} onClick={()=>pickContact(ct)} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 11px",borderRadius:9,cursor:"pointer",border:`0.5px solid ${c.border}`,background:c.bg}}>
+                  <Avatar f={ct.firstName} l={ct.lastName} size={30} color={stage.color}/>
+                  <div style={{minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:500,color:c.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{[ct.firstName,ct.lastName].filter(Boolean).join(" ")||ct.company||"—"}</div>
+                    <div style={{fontSize:11,color:c.sec,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{[ct.company,ct.email].filter(Boolean).join(" · ")}</div>
+                  </div>
+                  <span style={{marginLeft:"auto",color:c.sec,fontSize:18,flexShrink:0}}>&#x203A;</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {mode==="new" && (
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+              <Inp c={c} value={f.firstName} onChange={upd("firstName")} placeholder="Imie"/>
+              <Inp c={c} value={f.lastName} onChange={upd("lastName")} placeholder="Nazwisko"/>
+            </div>
+            <Inp c={c} value={f.company} onChange={upd("company")} placeholder="Firma"/>
+            <Inp c={c} value={f.email} onChange={upd("email")} placeholder="Email" type="email"/>
+            <Inp c={c} value={f.phone} onChange={upd("phone")} placeholder="Telefon"/>
+            <div style={{fontSize:12,color:c.sec,padding:"2px 0"}}>Kontakt zostanie automatycznie zapisany w bazie</div>
+            <Btn c={c} variant="primary" onClick={saveNew} disabled={!f.firstName&&!f.lastName&&!f.company} full>Dodaj lead</Btn>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Kanban ─────────────────────────────────────────────────────────────────────
+function LeadCard({lead,stage,onClick,onDragStart,onDragEnd,c,dragging}) {
+  const [hover,setHover] = useState(false);
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onClick={onClick}
+      onMouseEnter={()=>setHover(true)}
+      onMouseLeave={()=>setHover(false)}
+      className={dragging?"dragging":""}
+      style={{background:lead.won?c.greenBg:c.card,border:`0.5px solid ${lead.won?c.green:c.border}`,borderRadius:10,padding:"10px 12px",cursor:"grab",marginBottom:6,transform:hover&&!dragging?"translateY(-1px)":"none",transition:"transform 0.15s,box-shadow 0.15s,opacity 0.15s",boxShadow:hover&&!dragging?"0 2px 12px rgba(0,0,0,0.08)":"none",userSelect:"none"}}>
+      <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:4}}>
+        <Avatar f={lead.firstName} l={lead.lastName} size={26} color={lead.won?c.green:(stage?.color||"#007AFF")}/>
+        <div style={{minWidth:0,flex:1}}>
+          <div style={{fontSize:13,fontWeight:500,color:c.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{fullName(lead)}</div>
+          {lead.company&&<div style={{fontSize:11,color:c.sec,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{lead.company}</div>}
+        </div>
+        {lead.won&&<span style={{fontSize:10,fontWeight:600,color:c.green,flexShrink:0}}>&#x2713;</span>}
+      </div>
+      {lead.email&&<div style={{fontSize:11,color:c.sec,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{lead.email}</div>}
+    </div>
+  );
+}
+
+function KanbanCol({stage,leads,contacts,draggedId,onDragStart,onDragEnd,onAdd,onAddContact,onLeadClick,onDropLead,c}) {
+  const [open,setOpen] = useState(false);
+  const [dragOver,setDragOver] = useState(false);
+  const dragCounter = useRef(0);
+  return (
+    <div
+      onDragEnter={e=>{e.preventDefault(); dragCounter.current++; if(draggedId) setDragOver(true);}}
+      onDragLeave={()=>{dragCounter.current--; if(dragCounter.current<=0){setDragOver(false); dragCounter.current=0;}}}
+      onDragOver={e=>{e.preventDefault(); e.dataTransfer.dropEffect="move";}}
+      onDrop={e=>{
+        e.preventDefault();
+        dragCounter.current=0;
+        setDragOver(false);
+        const id = e.dataTransfer.getData("text/plain");
+        if (id) onDropLead(id, stage.id);
+      }}
+      style={{width:220,flexShrink:0,background:dragOver?c.colHi:c.col,borderRadius:12,padding:10,transition:"background 0.15s",border:dragOver?`2px dashed ${stage.color}`:`2px solid transparent`,boxSizing:"border-box"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 2px",marginBottom:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <div style={{width:7,height:7,borderRadius:4,background:stage.color}}/>
+          <span style={{fontSize:12,fontWeight:600,color:c.text}}>{stage.name}</span>
+          <span style={{fontSize:11,color:c.sec}}>{leads.length}</span>
+        </div>
+        <button onClick={()=>setOpen(true)} style={{background:"none",border:"none",cursor:"pointer",color:c.sec,fontSize:22,lineHeight:1,padding:"0 4px",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:6}}>+</button>
+      </div>
+      {open&&<AddLeadModal stage={stage} contacts={contacts} onAdd={onAdd} onAddContact={onAddContact} onClose={()=>setOpen(false)} c={c}/>}
+      {leads.map(lead=>(
+        <LeadCard key={lead.id} lead={lead} stage={stage}
+          onClick={()=>onLeadClick(lead)}
+          onDragStart={e=>{e.dataTransfer.setData("text/plain",lead.id); e.dataTransfer.effectAllowed="move"; onDragStart(lead.id);}}
+          onDragEnd={onDragEnd}
+          dragging={draggedId===lead.id}
+          c={c}/>
+      ))}
+    </div>
+  );
+}
+
+// ── Lead Products Section ─────────────────────────────────────────────────────
+function LeadProductsSection({leadId,leadProductsList,products,onAdd,onDelete,c}) {
+  const [open,setOpen] = useState(false);
+  const [sel,setSel] = useState("");
+  const [qty,setQty] = useState("1");
+  const [val,setVal] = useState("");
+  const mine = leadProductsList.filter(lp=>lp.leadId===leadId);
+  const total = mine.reduce((s,lp)=>s+Number(lp.value||0),0);
+  const save = () => {
+    if (!sel) return;
+    const prod = products.find(p=>p.id===sel);
+    if (!prod) return;
+    onAdd({leadId,productId:sel,productName:prod.name,quantity:Number(qty)||1,value:Number(val)||0});
+    setSel(""); setQty("1"); setVal(""); setOpen(false);
+  };
+  return (
+    <div style={{marginBottom:24}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+        <SectionLabel c={c}>Produkty</SectionLabel>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {total>0&&<span style={{fontSize:12,fontWeight:600,color:c.green}}>{fmtVal(total)}</span>}
+          <Btn c={c} variant="ghost" small onClick={()=>setOpen(o=>!o)}>{open?"Anuluj":"+ Dodaj"}</Btn>
+        </div>
+      </div>
+      {open && (
+        <Card c={c} style={{padding:14,marginBottom:10}}>
+          {products.length===0 ? (
+            <div style={{fontSize:13,color:c.sec}}>Najpierw dodaj produkty w zakladce Produkty.</div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:7}}>
+              <select value={sel} onChange={e=>setSel(e.target.value)} style={{padding:"8px 12px",borderRadius:8,border:`0.5px solid ${c.border}`,background:c.input,color:c.text,fontSize:14,outline:"none",fontFamily:"inherit",width:"100%"}}>
+                <option value="">Wybierz produkt...</option>
+                {products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+                <Inp c={c} value={qty} onChange={setQty} placeholder="Ilosc" type="number" min="1"/>
+                <Inp c={c} value={val} onChange={setVal} placeholder="Wartosc (zl)" type="number" min="0"/>
+              </div>
+              <Btn c={c} variant="primary" small onClick={save} disabled={!sel}>Dodaj produkt</Btn>
+            </div>
+          )}
+        </Card>
+      )}
+      {mine.length===0&&!open&&<div style={{fontSize:13,color:c.sec,padding:"6px 0"}}>Brak produktow</div>}
+      {mine.map(lp=>(
+        <Card c={c} key={lp.id} style={{padding:"9px 14px",marginBottom:5,display:"flex",alignItems:"center",gap:10}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:13,fontWeight:500,color:c.text}}>{lp.productName}</div>
+            <div style={{fontSize:12,color:c.sec}}>Ilosc: {lp.quantity} &nbsp;·&nbsp; Wartosc: {fmtVal(lp.value)}</div>
+          </div>
+          <DeleteBtn onConfirm={()=>onDelete(lp.id)} c={c}/>
+        </Card>
+      ))}
+      {mine.length>1&&<div style={{fontSize:12,color:c.sec,textAlign:"right",paddingRight:4,marginTop:2}}>Razem: <strong style={{color:c.text}}>{fmtVal(total)}</strong></div>}
+    </div>
+  );
+}
+
+// ── Lead Detail ───────────────────────────────────────────────────────────────
+function LeadDetail({lead,stages,leadEvents,leadNotes,leadProductsList,products,onUpdate,onDelete,onMarkWon,onAddEvent,onAddNote,onDeleteEvent,onDeleteNote,onAddLeadProduct,onDeleteLeadProduct,onBack,c}) {
+  const [editing,setEditing] = useState(false);
+  const [form,setForm] = useState({...lead});
+  const [ev,setEv] = useState({title:"",date:"",time:"",location:"",description:""});
+  const [showEv,setShowEv] = useState(false);
+  const [noteText,setNoteText] = useState("");
+  const [confirmWon,setConfirmWon] = useState(false);
+  const upd = k => v => setForm(p=>({...p,[k]:v}));
+  const updEv = k => v => setEv(p=>({...p,[k]:v}));
+  const stage = stages.find(s=>s.id===lead.stageId);
+  const save = () => { onUpdate({...form}); setEditing(false); };
+  const saveEv = () => { if (!ev.title.trim()) return; onAddEvent({...ev,leadId:lead.id}); setEv({title:"",date:"",time:"",location:"",description:""}); setShowEv(false); };
+  const saveNote = () => { if (!noteText.trim()) return; onAddNote({content:noteText,leadId:lead.id}); setNoteText(""); };
+
+  return (
+    <div style={{maxWidth:560,margin:"0 auto",padding:"4px 20px 60px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,paddingBottom:20,marginBottom:20,borderBottom:`0.5px solid ${c.border}`,flexWrap:"wrap"}}>
+        <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:c.accent,fontSize:14,padding:0,display:"flex",alignItems:"center",gap:4}}>&#8249; Pipeline</button>
+        <div style={{flex:1}}/>
+        {!lead.won && !editing && !confirmWon && (
+          <Btn c={c} variant="success" small onClick={()=>setConfirmWon(true)}>Sukces</Btn>
+        )}
+        {confirmWon && (
+          <><span style={{fontSize:12,color:c.green,marginRight:4}}>Zamknac jako wygrany?</span>
+          <Btn c={c} variant="success" small onClick={()=>{onMarkWon(lead.id);setConfirmWon(false);}}>Tak</Btn>
+          <Btn c={c} small onClick={()=>setConfirmWon(false)}>Nie</Btn></>
+        )}
+        {!confirmWon && (editing ? (
+          <><Btn c={c} variant="primary" small onClick={save}>Zapisz</Btn><Btn c={c} small onClick={()=>{setForm({...lead});setEditing(false);}}>Anuluj</Btn></>
+        ) : (
+          <><Btn c={c} small onClick={()=>setEditing(true)}>Edytuj</Btn>
+          <DeleteBtn variant="text" onConfirm={()=>onDelete(lead.id)} c={c} strongWarning="Usunac leada wraz z historia?"/></>
+        ))}
+      </div>
+
+      <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:24}}>
+        <Avatar f={lead.firstName} l={lead.lastName} size={52} color={lead.won?c.green:(stage?.color||c.accent)}/>
+        <div>
+          <div style={{fontSize:20,fontWeight:700,color:c.text,letterSpacing:-0.3}}>{fullName(lead)}</div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginTop:5,flexWrap:"wrap"}}>
+            {lead.company&&<span style={{fontSize:14,color:c.sec}}>{lead.company}</span>}
+            <StageBadge stage={stage}/>
+            {lead.won&&<WonBadge c={c}/>}
+          </div>
+        </div>
+      </div>
+
+      {editing && (
+        <Card c={c} style={{padding:16,marginBottom:24}}>
+          <SectionLabel c={c}>Dane leada</SectionLabel>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <Inp c={c} value={form.firstName||""} onChange={upd("firstName")} placeholder="Imie"/>
+              <Inp c={c} value={form.lastName||""} onChange={upd("lastName")} placeholder="Nazwisko"/>
+            </div>
+            <Inp c={c} value={form.company||""} onChange={upd("company")} placeholder="Firma"/>
+            <Inp c={c} value={form.email||""} onChange={upd("email")} placeholder="Email" type="email"/>
+            <Inp c={c} value={form.phone||""} onChange={upd("phone")} placeholder="Telefon"/>
+            <select value={form.stageId} onChange={e=>upd("stageId")(e.target.value)} style={{padding:"8px 12px",borderRadius:8,border:`0.5px solid ${c.border}`,background:c.input,color:c.text,fontSize:14,outline:"none",fontFamily:"inherit"}}>
+              {stages.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <Inp c={c} value={form.note||""} onChange={upd("note")} placeholder="Notatka ogolna" rows={3}/>
+          </div>
+        </Card>
+      )}
+
+      {!editing && (
+        <Card c={c} style={{padding:"4px 16px",marginBottom:24}}>
+          {[["Email",lead.email],["Telefon",lead.phone]].filter(([,v])=>v).map(([label,value])=>(
+            <div key={label} style={{display:"flex",gap:12,padding:"10px 0",borderBottom:`0.5px solid ${c.border}`}}>
+              <span style={{fontSize:13,color:c.sec,width:72,flexShrink:0}}>{label}</span>
+              <span style={{fontSize:13,color:c.text}}>{value}</span>
+            </div>
+          ))}
+          {lead.note&&(<div style={{padding:"10px 0"}}><div style={{fontSize:12,color:c.sec,marginBottom:4}}>Notatka ogolna</div><div style={{fontSize:13,color:c.text,lineHeight:1.6}}>{lead.note}</div></div>)}
+          {!lead.email&&!lead.phone&&!lead.note&&<div style={{padding:"14px 0",fontSize:13,color:c.sec}}>Brak danych &mdash; kliknij Edytuj</div>}
+        </Card>
+      )}
+
+      <LeadProductsSection leadId={lead.id} leadProductsList={leadProductsList} products={products} onAdd={onAddLeadProduct} onDelete={onDeleteLeadProduct} c={c}/>
+
+      <div style={{marginBottom:24}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+          <SectionLabel c={c}>Wydarzenia</SectionLabel>
+          <Btn c={c} variant="ghost" small onClick={()=>setShowEv(o=>!o)}>{showEv?"Anuluj":"+ Dodaj"}</Btn>
+        </div>
+        {showEv && (
+          <Card c={c} style={{padding:14,marginBottom:10}}>
+            <div style={{display:"flex",flexDirection:"column",gap:7}}>
+              <Inp c={c} value={ev.title} onChange={updEv("title")} placeholder="Tytul *"/>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+                <Inp c={c} value={ev.date} onChange={updEv("date")} type="date"/>
+                <Inp c={c} value={ev.time} onChange={updEv("time")} type="time"/>
+              </div>
+              <Inp c={c} value={ev.location} onChange={updEv("location")} placeholder="Miejsce"/>
+              <Inp c={c} value={ev.description} onChange={updEv("description")} placeholder="Opis" rows={2}/>
+              <Btn c={c} variant="primary" small onClick={saveEv} disabled={!ev.title.trim()}>Zapisz wydarzenie</Btn>
+            </div>
+          </Card>
+        )}
+        {leadEvents.length===0&&!showEv&&<div style={{fontSize:13,color:c.sec,padding:"6px 0"}}>Brak wydarzen</div>}
+        {[...leadEvents].sort((a,b)=>(a.date||"").localeCompare(b.date||"")).map(event=>{
+          const url = gcalUrl(event,lead);
+          return (
+            <Card c={c} key={event.id} style={{padding:"10px 14px",marginBottom:6,display:"flex",alignItems:"flex-start",gap:10}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,fontWeight:500,color:c.text}}>{event.title}</div>
+                <div style={{fontSize:12,color:c.sec,marginTop:2}}>{dateFmt(event.date)}{event.time?`, ${event.time}`:""}{event.location?` · ${event.location}`:""}</div>
+                {event.description&&<div style={{fontSize:12,color:c.sec,marginTop:4}}>{event.description}</div>}
+              </div>
+              <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+                {url&&<a href={url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:c.accent,textDecoration:"none",padding:"4px 10px",borderRadius:6,background:c.accentBg,fontWeight:500,whiteSpace:"nowrap"}}>+ Kalendarz</a>}
+                <DeleteBtn onConfirm={()=>onDeleteEvent(event.id)} c={c}/>
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+
+      <div>
+        <SectionLabel c={c}>Notatki</SectionLabel>
+        <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:10}}>
+          <Inp c={c} value={noteText} onChange={setNoteText} placeholder="Nowa notatka..." rows={3}/>
+          <Btn c={c} variant={noteText.trim()?"primary":"default"} small onClick={saveNote} disabled={!noteText.trim()}>Dodaj notatke</Btn>
+        </div>
+        {leadNotes.map(note=>(
+          <Card c={c} key={note.id} style={{padding:"10px 14px",marginBottom:6,display:"flex",gap:10,alignItems:"flex-start"}}>
+            <div style={{flex:1,fontSize:13,color:c.text,lineHeight:1.6}}>{note.content}</div>
+            <DeleteBtn onConfirm={()=>onDeleteNote(note.id)} c={c}/>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Contacts Page ──────────────────────────────────────────────────────────────
+function ContactsPage({contacts,leads,leadProductsList,onAdd,onDelete,onClearAll,c}) {
+  const [q,setQ] = useState("");
+  const [open,setOpen] = useState(false);
+  const [f,setF] = useState({firstName:"",lastName:"",company:"",email:"",phone:""});
+  const upd = k => v => setF(p=>({...p,[k]:v}));
+  const wonLeads = leads.filter(l=>l.won&&l.contactId);
+  const clientIds = new Set(wonLeads.map(l=>l.contactId));
+  const filtered = q ? contacts.filter(ct=>[ct.firstName,ct.lastName,ct.company,ct.email].some(x=>x?.toLowerCase().includes(q.toLowerCase()))) : contacts;
+  const save = () => { if (!f.firstName&&!f.lastName&&!f.company&&!f.email) return; onAdd({...f}); setF({firstName:"",lastName:"",company:"",email:"",phone:""}); setOpen(false); };
+  const hasClients = clientIds.size>0;
+
+  return (
+    <div style={{maxWidth:560,margin:"0 auto",padding:"4px 20px 60px"}}>
+      <div style={{display:"flex",gap:10,marginBottom:16,alignItems:"center",flexWrap:"wrap"}}>
+        <div style={{flex:1,minWidth:180}}><Inp c={c} value={q} onChange={setQ} placeholder="Szukaj kontaktu..."/></div>
+        <Btn c={c} variant="primary" onClick={()=>setOpen(o=>!o)}>+ Kontakt</Btn>
+        {contacts.length>0 && <ClearAllBtn c={c} label="Wyczysc baze" firstWarning={`Usunac ${contacts.length} kontaktow${hasClients?" (i historie klientow)":""}?`} secondWarning="Tego nie cofniesz!" onConfirm={onClearAll}/>}
+      </div>
+      {open && (
+        <Card c={c} style={{padding:16,marginBottom:16}}>
+          <SectionLabel c={c}>Nowy kontakt</SectionLabel>
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+              <Inp c={c} value={f.firstName} onChange={upd("firstName")} placeholder="Imie"/>
+              <Inp c={c} value={f.lastName} onChange={upd("lastName")} placeholder="Nazwisko"/>
+            </div>
+            <Inp c={c} value={f.company} onChange={upd("company")} placeholder="Firma"/>
+            <Inp c={c} value={f.email} onChange={upd("email")} placeholder="Email" type="email"/>
+            <Inp c={c} value={f.phone} onChange={upd("phone")} placeholder="Telefon"/>
+            <div style={{display:"flex",gap:7}}>
+              <Btn c={c} variant="primary" small onClick={save}>Zapisz</Btn>
+              <Btn c={c} small onClick={()=>setOpen(false)}>Anuluj</Btn>
+            </div>
+          </div>
+        </Card>
+      )}
+      {filtered.length===0&&<div style={{textAlign:"center",padding:"48px 0",fontSize:14,color:c.sec}}>{q?"Brak wynikow":"Brak kontaktow"}</div>}
+      {filtered.map(ct=>{
+        const isClient = clientIds.has(ct.id);
+        const ctWonLeads = wonLeads.filter(l=>l.contactId===ct.id);
+        const ctProds = ctWonLeads.flatMap(l=>leadProductsList.filter(lp=>lp.leadId===l.id));
+        const ctTotal = ctProds.reduce((s,lp)=>s+Number(lp.value||0),0);
+        return (
+          <Card c={c} key={ct.id} style={{padding:"12px 16px",marginBottom:6}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <Avatar f={ct.firstName} l={ct.lastName} size={36} color={isClient?c.green:c.accent}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{fontSize:14,fontWeight:500,color:c.text}}>{[ct.firstName,ct.lastName].filter(Boolean).join(" ")||ct.company||"—"}</div>
+                  {isClient&&<WonBadge c={c}/>}
+                </div>
+                <div style={{fontSize:12,color:c.sec,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{[ct.company,ct.email,ct.phone].filter(Boolean).join(" · ")}</div>
+              </div>
+              <DeleteBtn onConfirm={()=>onDelete(ct.id)} c={c} strongWarning={isClient?"Usunac kontakt i historie?":"Usunac?"}/>
+            </div>
+            {isClient&&ctProds.length>0&&(
+              <div style={{marginTop:10,paddingTop:10,borderTop:`0.5px solid ${c.border}`}}>
+                <div style={{fontSize:11,fontWeight:600,color:c.sec,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Zakupione produkty</div>
+                {ctProds.map(lp=>(
+                  <div key={lp.id} style={{display:"flex",justifyContent:"space-between",fontSize:12,color:c.text,padding:"2px 0"}}>
+                    <span>{lp.productName} &times; {lp.quantity}</span>
+                    <span style={{color:c.sec}}>{fmtVal(lp.value)}</span>
+                  </div>
+                ))}
+                {ctTotal>0&&<div style={{fontSize:12,fontWeight:600,color:c.green,textAlign:"right",marginTop:4}}>Razem: {fmtVal(ctTotal)}</div>}
+              </div>
+            )}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Clients Page ───────────────────────────────────────────────────────────────
+function ClientsPage({leads,leadProductsList,onUnwon,onUnwonAll,c}) {
+  const [q,setQ] = useState("");
+  const wonLeads = leads.filter(l=>l.won);
+  const filtered = q ? wonLeads.filter(l=>[l.firstName,l.lastName,l.company,l.email].some(x=>x?.toLowerCase().includes(q.toLowerCase()))) : wonLeads;
+
+  return (
+    <div style={{maxWidth:560,margin:"0 auto",padding:"4px 20px 60px"}}>
+      <div style={{display:"flex",gap:10,marginBottom:16,alignItems:"center",flexWrap:"wrap"}}>
+        <div style={{flex:1,minWidth:200}}><Inp c={c} value={q} onChange={setQ} placeholder="Szukaj klienta..."/></div>
+        {wonLeads.length>0 && <ClearAllBtn c={c} label="Cofnij wszystkich" firstWarning={`Cofnac sukces u ${wonLeads.length} klientow?`} secondWarning="Na pewno? Wszyscy wroca do pipeline" onConfirm={onUnwonAll}/>}
+      </div>
+      {filtered.length===0&&(
+        <div style={{textAlign:"center",padding:"48px 0",color:c.sec}}>
+          <div style={{fontSize:14}}>{q?"Brak wynikow":"Brak klientow — zamknij leada przyciskiem Sukces"}</div>
+        </div>
+      )}
+      {filtered.map(lead=>{
+        const prods = leadProductsList.filter(lp=>lp.leadId===lead.id);
+        const total = prods.reduce((s,lp)=>s+Number(lp.value||0),0);
+        return (
+          <Card c={c} key={lead.id} style={{padding:"14px 16px",marginBottom:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:prods.length>0?12:0}}>
+              <Avatar f={lead.firstName} l={lead.lastName} size={40} color={c.green}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                  <div style={{fontSize:15,fontWeight:600,color:c.text}}>{fullName(lead)}</div>
+                  <WonBadge c={c}/>
+                </div>
+                <div style={{fontSize:12,color:c.sec,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>
+                  {[lead.company,lead.email,lead.phone].filter(Boolean).join(" · ")}
+                </div>
+                {lead.wonAt&&<div style={{fontSize:11,color:c.sec,marginTop:2}}>Zamkniety: {dateFmt(lead.wonAt.slice(0,10))}</div>}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
+                {total>0&&<div style={{fontSize:14,fontWeight:700,color:c.green}}>{fmtVal(total)}</div>}
+                <DeleteBtn variant="text" onConfirm={()=>onUnwon(lead.id)} c={c} strongWarning="Cofnac sukces?"/>
+              </div>
+            </div>
+            {prods.length>0&&(
+              <div style={{borderTop:`0.5px solid ${c.border}`,paddingTop:10}}>
+                <div style={{fontSize:11,fontWeight:600,color:c.sec,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Produkty</div>
+                {prods.map(lp=>(
+                  <div key={lp.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 0",borderBottom:`0.5px solid ${c.border}`}}>
+                    <div>
+                      <span style={{fontSize:13,fontWeight:500,color:c.text}}>{lp.productName}</span>
+                      <span style={{fontSize:12,color:c.sec,marginLeft:8}}>&times; {lp.quantity}</span>
+                    </div>
+                    <span style={{fontSize:13,color:c.text}}>{fmtVal(lp.value)}</span>
+                  </div>
+                ))}
+                {prods.length>0&&<div style={{fontSize:12,fontWeight:600,color:c.green,textAlign:"right",marginTop:6}}>Razem: {fmtVal(total)}</div>}
+              </div>
+            )}
+            {prods.length===0&&<div style={{fontSize:13,color:c.sec}}>Brak produktow w tym leadzie</div>}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Products Page ──────────────────────────────────────────────────────────────
+function ProductsPage({products,leadProductsList,onAdd,onUpdate,onDelete,onClearAll,c}) {
+  const [open,setOpen] = useState(false);
+  const [f,setF] = useState({name:"",description:""});
+  const [editId,setEditId] = useState(null);
+  const [editData,setEditData] = useState({});
+  const upd = k => v => setF(p=>({...p,[k]:v}));
+  const save = () => { if (!f.name.trim()) return; onAdd({...f}); setF({name:"",description:""}); setOpen(false); };
+  const usedCount = new Set(leadProductsList.map(lp=>lp.productId)).size;
+  return (
+    <div style={{maxWidth:560,margin:"0 auto",padding:"4px 20px 60px"}}>
+      <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        {products.length>0 && <ClearAllBtn c={c} label="Wyczysc baze" firstWarning={`Usunac ${products.length} produktow${usedCount>0?" (uzywane na leadach tez znikna)":""}?`} secondWarning="Tego nie cofniesz!" onConfirm={onClearAll}/>}
+        <Btn c={c} variant="primary" onClick={()=>setOpen(o=>!o)}>+ Produkt</Btn>
+      </div>
+      {open&&(
+        <Card c={c} style={{padding:16,marginBottom:16}}>
+          <SectionLabel c={c}>Nowy produkt</SectionLabel>
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            <Inp c={c} value={f.name} onChange={upd("name")} placeholder="Nazwa *"/>
+            <Inp c={c} value={f.description} onChange={upd("description")} placeholder="Opis" rows={2}/>
+            <div style={{display:"flex",gap:7}}>
+              <Btn c={c} variant="primary" small onClick={save} disabled={!f.name.trim()}>Zapisz</Btn>
+              <Btn c={c} small onClick={()=>setOpen(false)}>Anuluj</Btn>
+            </div>
+          </div>
+        </Card>
+      )}
+      {products.length===0&&!open&&<div style={{textAlign:"center",padding:"48px 0",fontSize:14,color:c.sec}}>Brak produktow &mdash; dodaj pierwszy produkt</div>}
+      {products.map(prod=>(
+        <Card c={c} key={prod.id} style={{padding:"12px 16px",marginBottom:6}}>
+          {editId===prod.id ? (
+            <div style={{display:"flex",flexDirection:"column",gap:7}}>
+              <Inp c={c} value={editData.name||""} onChange={v=>setEditData(p=>({...p,name:v}))} placeholder="Nazwa *"/>
+              <Inp c={c} value={editData.description||""} onChange={v=>setEditData(p=>({...p,description:v}))} placeholder="Opis" rows={2}/>
+              <div style={{display:"flex",gap:7}}>
+                <Btn c={c} variant="primary" small onClick={()=>{onUpdate(editData);setEditId(null);}}>Zapisz</Btn>
+                <Btn c={c} small onClick={()=>setEditId(null)}>Anuluj</Btn>
+              </div>
+            </div>
+          ) : (
+            <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:14,fontWeight:500,color:c.text}}>{prod.name}</div>
+                {prod.description&&<div style={{fontSize:12,color:c.sec,marginTop:3,lineHeight:1.5}}>{prod.description}</div>}
+              </div>
+              <div style={{display:"flex",gap:6,flexShrink:0,alignItems:"center"}}>
+                <Btn c={c} small variant="ghost" onClick={()=>{setEditId(prod.id);setEditData({...prod});}}>Edytuj</Btn>
+                <DeleteBtn variant="text" onConfirm={()=>onDelete(prod.id)} c={c}/>
+              </div>
+            </div>
+          )}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// ── Settings Page ──────────────────────────────────────────────────────────────
+function SettingsPage({stages,onAdd,onUpdate,onDelete,onClearAllData,c}) {
+  const [name,setName] = useState("");
+  const [color,setColor] = useState(COLORS[0]);
+  const [editId,setEditId] = useState(null);
+  const [editData,setEditData] = useState({});
+  const sorted = [...stages].sort((a,b)=>a.order-b.order);
+  const add = () => { if (!name.trim()) return; onAdd({name:name.trim(),color}); setName(""); };
+  return (
+    <div style={{maxWidth:460,margin:"0 auto",padding:"4px 20px 60px"}}>
+      <SectionLabel c={c}>Etapy sprzedazy</SectionLabel>
+      {sorted.map(stage=>(
+        <Card c={c} key={stage.id} style={{padding:"10px 14px",marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
+          {editId===stage.id ? (
+            <>
+              <input type="color" value={editData.color} onChange={e=>setEditData(p=>({...p,color:e.target.value}))} style={{width:28,height:28,border:"none",borderRadius:6,cursor:"pointer",padding:0}}/>
+              <input value={editData.name} onChange={e=>setEditData(p=>({...p,name:e.target.value}))} style={{flex:1,padding:"6px 10px",borderRadius:8,border:`0.5px solid ${c.border}`,background:c.input,color:c.text,fontSize:14,outline:"none",fontFamily:"inherit"}}/>
+              <Btn c={c} variant="primary" small onClick={()=>{onUpdate(editData);setEditId(null);}}>OK</Btn>
+              <Btn c={c} small onClick={()=>setEditId(null)}>&#x2715;</Btn>
+            </>
+          ) : (
+            <>
+              <div style={{width:10,height:10,borderRadius:5,background:stage.color,flexShrink:0}}/>
+              <span style={{flex:1,fontSize:14,color:c.text}}>{stage.name}</span>
+              <Btn c={c} small variant="ghost" onClick={()=>{setEditId(stage.id);setEditData({...stage});}}>Edytuj</Btn>
+              {stages.length>1&&<DeleteBtn variant="text" onConfirm={()=>onDelete(stage.id)} c={c}/>}
+            </>
+          )}
+        </Card>
+      ))}
+      <Card c={c} style={{padding:16,marginTop:16}}>
+        <SectionLabel c={c}>Nowy etap</SectionLabel>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <Inp c={c} value={name} onChange={setName} placeholder="Nazwa etapu"/>
+          <Btn c={c} variant="primary" onClick={add} disabled={!name.trim()}>Dodaj</Btn>
+        </div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {COLORS.map(clr=>(
+            <button key={clr} onClick={()=>setColor(clr)} style={{width:22,height:22,borderRadius:11,background:clr,border:`2px solid ${color===clr?c.text:"transparent"}`,cursor:"pointer",padding:0,transform:color===clr?"scale(1.2)":"scale(1)",transition:"transform 0.1s"}}/>
+          ))}
+        </div>
+      </Card>
+      <Card c={c} style={{padding:16,marginTop:16,background:c.accentBg}}>
+        <div style={{fontSize:14,fontWeight:600,color:c.text,marginBottom:6}}>Google Calendar</div>
+        <div style={{fontSize:13,color:c.sec,lineHeight:1.7}}>Przy kazdym wydarzeniu kliknij <strong style={{color:c.accent}}>+ Kalendarz</strong> &mdash; otworzy sie Google Calendar z wypelnionym formularzem.</div>
+      </Card>
+      <Card c={c} style={{padding:16,marginTop:16,background:c.accentBg}}>
+        <div style={{fontSize:14,fontWeight:600,color:c.text,marginBottom:6}}>Pipeline</div>
+        <div style={{fontSize:13,color:c.sec,lineHeight:1.7}}>Mozesz przeciagac leady myszka miedzy kolumnami. Klikniecie otwiera szczegoly leada.</div>
+      </Card>
+
+      <div style={{marginTop:24}}>
+        <SectionLabel c={c}>Gdzie sa moje dane</SectionLabel>
+        <Card c={c} style={{padding:16}}>
+          <div style={{fontSize:13,color:c.text,lineHeight:1.7}}>
+            Dane sa zapisane w <strong>pamieci tej przegladarki</strong> (localStorage). Nie ida na zaden serwer &mdash; wszystko jest u Ciebie lokalnie.
+            <div style={{marginTop:10,paddingTop:10,borderTop:`0.5px solid ${c.border}`,fontSize:12,color:c.sec}}>
+              <div style={{marginBottom:4}}><strong style={{color:c.text}}>Co to znaczy w praktyce:</strong></div>
+              &bull; Dzialaja tylko w <strong>tej przegladarce na tym komputerze</strong><br/>
+              &bull; Otworzysz plik w Chrome zamiast Safari &rarr; nowa pusta baza<br/>
+              &bull; Inny Mac &rarr; nowa pusta baza<br/>
+              &bull; Wyczyszczenie historii/danych Safari moze je skasowac<br/>
+              &bull; Plik fizyczny jest w wewnetrznym formacie Safari &mdash; nie da sie go otworzyc recznie
+            </div>
+          </div>
+        </Card>
+      </div>
+
+      <div style={{marginTop:24}}>
+        <SectionLabel c={c}>Strefa ryzyka</SectionLabel>
+        <Card c={c} style={{padding:16,border:`0.5px solid rgba(255,59,48,0.3)`}}>
+          <div style={{fontSize:13,color:c.text,marginBottom:10,lineHeight:1.6}}>
+            Usun calkowicie wszystkie dane: leady, kontakty, klientow, produkty, wydarzenia, notatki. Etapy i ustawienia zostaja.
+          </div>
+          <ClearAllBtn c={c} label="Wyczysc wszystko" firstWarning="Usunac WSZYSTKIE dane?" secondWarning="Ostatnia szansa &mdash; tego nie da sie cofnac!" onConfirm={onClearAllData}/>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [dark,setDark] = useState(false);
+  const [page,setPage] = useState("kanban");
+  const [stages,setStages] = useState(INIT_STAGES);
+  const [leads,setLeads] = useState([]);
+  const [events,setEvents] = useState([]);
+  const [notes,setNotes] = useState([]);
+  const [contacts,setContacts] = useState([]);
+  const [products,setProducts] = useState([]);
+  const [leadProducts,setLeadProducts] = useState([]);
+  const [selLead,setSelLead] = useState(null);
+  const [ready,setReady] = useState(false);
+  const [draggedId,setDraggedId] = useState(null);
+  const c = dark ? DT : LT;
+
+  useEffect(()=>{
+    (async()=>{
+      const [s,l,ev,n,ct,pr,lpr,d] = await Promise.all([
+        db.get("stages"),db.get("leads"),db.get("events"),db.get("notes"),
+        db.get("contacts"),db.get("products"),db.get("leadProducts"),db.get("dark")
+      ]);
+      if (s?.length) setStages(s);
+      if (l) setLeads(l);
+      if (ev) setEvents(ev);
+      if (n) setNotes(n);
+      if (ct) setContacts(ct);
+      if (pr) setProducts(pr);
+      if (lpr) setLeadProducts(lpr);
+      if (d !== null) setDark(!!d);
+      setReady(true);
+    })();
+  },[]);
+
+  useEffect(()=>{if(ready)db.set("stages",stages);},[stages,ready]);
+  useEffect(()=>{if(ready)db.set("leads",leads);},[leads,ready]);
+  useEffect(()=>{if(ready)db.set("events",events);},[events,ready]);
+  useEffect(()=>{if(ready)db.set("notes",notes);},[notes,ready]);
+  useEffect(()=>{if(ready)db.set("contacts",contacts);},[contacts,ready]);
+  useEffect(()=>{if(ready)db.set("products",products);},[products,ready]);
+  useEffect(()=>{if(ready)db.set("leadProducts",leadProducts);},[leadProducts,ready]);
+  useEffect(()=>{if(ready)db.set("dark",dark);},[dark,ready]);
+
+  const currentLead = leads.find(l=>l.id===selLead);
+
+  const addLead    = d => setLeads(p=>[...p,{id:uid(),note:"",email:"",phone:"",won:false,createdAt:new Date().toISOString(),...d}]);
+  const updLead    = u => setLeads(p=>p.map(l=>l.id===u.id?u:l));
+  const moveLead   = (id, stageId) => setLeads(p=>p.map(l=>l.id===id?{...l,stageId}:l));
+  const delLead    = id => {
+    setLeads(p=>p.filter(l=>l.id!==id));
+    setEvents(p=>p.filter(e=>e.leadId!==id));
+    setNotes(p=>p.filter(n=>n.leadId!==id));
+    setLeadProducts(p=>p.filter(lp=>lp.leadId!==id));
+    setPage("kanban"); setSelLead(null);
+  };
+  const markWon    = id => setLeads(p=>p.map(l=>l.id===id?{...l,won:true,wonAt:new Date().toISOString()}:l));
+
+  const addContact = d => { const nc={id:uid(),createdAt:new Date().toISOString(),...d}; setContacts(p=>[...p,nc]); return nc; };
+  const delContact = id => {
+    // Find all leads tied to this contact
+    const ctLeadIds = leads.filter(l=>l.contactId===id).map(l=>l.id);
+    setContacts(p=>p.filter(ct=>ct.id!==id));
+    setLeads(p=>p.filter(l=>l.contactId!==id));
+    setEvents(p=>p.filter(e=>!ctLeadIds.includes(e.leadId)));
+    setNotes(p=>p.filter(n=>!ctLeadIds.includes(n.leadId)));
+    setLeadProducts(p=>p.filter(lp=>!ctLeadIds.includes(lp.leadId)));
+    // If we were viewing one of these leads, go back to pipeline
+    if (selLead && ctLeadIds.includes(selLead)) { setSelLead(null); setPage("kanban"); }
+  };
+
+  const addProduct = d => setProducts(p=>[...p,{id:uid(),createdAt:new Date().toISOString(),...d}]);
+  const updProduct = u => setProducts(p=>p.map(x=>x.id===u.id?u:x));
+  const delProduct = id => { setProducts(p=>p.filter(x=>x.id!==id)); setLeadProducts(p=>p.filter(lp=>lp.productId!==id)); };
+
+  const addLeadProduct = d => setLeadProducts(p=>[...p,{id:uid(),createdAt:new Date().toISOString(),...d}]);
+  const delLeadProduct = id => setLeadProducts(p=>p.filter(x=>x.id!==id));
+
+  const addEv   = d => setEvents(p=>[...p,{id:uid(),createdAt:new Date().toISOString(),...d}]);
+  const delEv   = id => setEvents(p=>p.filter(e=>e.id!==id));
+  const addNote = d => setNotes(p=>[...p,{id:uid(),createdAt:new Date().toISOString(),...d}]);
+  const delNote = id => setNotes(p=>p.filter(n=>n.id!==id));
+
+  const addStage = d => setStages(p=>[...p,{id:uid(),order:p.length?Math.max(...p.map(s=>s.order))+1:0,...d}]);
+  const updStage = u => setStages(p=>p.map(s=>s.id===u.id?u:s));
+  const delStage = id => { if(stages.length<=1)return; const fb=stages.find(s=>s.id!==id); setStages(p=>p.filter(s=>s.id!==id)); setLeads(p=>p.map(l=>l.stageId===id?{...l,stageId:fb?.id}:l)); };
+
+  // Bulk operations
+  const unwon       = id => setLeads(p=>p.map(l=>l.id===id?{...l,won:false,wonAt:null}:l));
+  const unwonAll    = () => setLeads(p=>p.map(l=>l.won?{...l,won:false,wonAt:null}:l));
+  const clearContacts = () => {
+    // cascade: kontakty + powiazane leady + ich eventy/notatki/produkty
+    const ctLeadIds = leads.filter(l=>l.contactId).map(l=>l.id);
+    setContacts([]);
+    setLeads(p=>p.filter(l=>!l.contactId));
+    setEvents(p=>p.filter(e=>!ctLeadIds.includes(e.leadId)));
+    setNotes(p=>p.filter(n=>!ctLeadIds.includes(n.leadId)));
+    setLeadProducts(p=>p.filter(lp=>!ctLeadIds.includes(lp.leadId)));
+    if (selLead && ctLeadIds.includes(selLead)) { setSelLead(null); setPage("kanban"); }
+  };
+  const clearProducts = () => { setProducts([]); setLeadProducts([]); };
+  const clearAllData = () => {
+    setLeads([]); setEvents([]); setNotes([]); setContacts([]); setProducts([]); setLeadProducts([]);
+    setSelLead(null); setPage("kanban");
+  };
+
+  if (!ready) return <div style={{padding:32,color:"#6E6E73",fontSize:14}}>Ladowanie...</div>;
+
+  const NAV = [{id:"kanban",label:"Pipeline"},{id:"contacts",label:"Kontakty"},{id:"clients",label:"Klienci"},{id:"products",label:"Produkty"},{id:"settings",label:"Ustawienia"}];
+  const activeNav = page==="lead"?"kanban":page;
+  const TITLES = {kanban:"Pipeline",contacts:"Kontakty",clients:"Klienci",products:"Produkty",settings:"Ustawienia"};
+  const wonCount = leads.filter(l=>l.won).length;
+
+  return (
+    <div style={{minHeight:"100vh",background:c.bg,color:c.text}}>
+      <div style={{background:c.nav,borderBottom:`0.5px solid ${c.border}`,display:"flex",alignItems:"center",padding:"0 16px",height:50,gap:2,position:"sticky",top:0,zIndex:50,backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)"}}>
+        <div style={{fontSize:15,fontWeight:700,color:c.text,marginRight:10,letterSpacing:-0.3}}>CRM</div>
+        {NAV.map(n=>(
+          <button key={n.id} onClick={()=>{setPage(n.id);if(n.id!=="kanban")setSelLead(null);}}
+            style={{padding:"5px 10px",borderRadius:8,fontSize:13,fontWeight:activeNav===n.id?500:400,cursor:"pointer",border:"none",fontFamily:"inherit",background:activeNav===n.id?c.accentBg:"transparent",color:activeNav===n.id?c.accent:c.sec,transition:"all 0.15s",display:"flex",alignItems:"center",gap:4}}>
+            {n.label}
+            {n.id==="clients"&&wonCount>0&&<span style={{background:c.green,color:"#fff",fontSize:10,fontWeight:700,padding:"1px 5px",borderRadius:10,lineHeight:1.4}}>{wonCount}</span>}
+          </button>
+        ))}
+        <div style={{flex:1}}/>
+        <button onClick={()=>setDark(d=>!d)} style={{padding:"5px 10px",borderRadius:8,border:`0.5px solid ${c.border}`,background:"transparent",cursor:"pointer",color:c.sec,fontSize:13,fontFamily:"inherit"}}>
+          {dark?"Jasny":"Ciemny"}
+        </button>
+      </div>
+
+      {page!=="lead"&&<div style={{padding:"20px 20px 4px"}}><div style={{fontSize:24,fontWeight:700,color:c.text,letterSpacing:-0.4}}>{TITLES[page]}</div></div>}
+
+      <div style={{paddingTop:12}}>
+        {page==="kanban"&&(
+          <div style={{overflowX:"auto",paddingLeft:16,paddingRight:16,paddingBottom:20}}>
+            <div style={{display:"flex",gap:8,width:"max-content",minWidth:"100%"}}>
+              {[...stages].sort((a,b)=>a.order-b.order).map(stage=>(
+                <KanbanCol key={stage.id} stage={stage} leads={leads.filter(l=>l.stageId===stage.id)}
+                  contacts={contacts}
+                  draggedId={draggedId}
+                  onDragStart={id=>setDraggedId(id)}
+                  onDragEnd={()=>setDraggedId(null)}
+                  onAdd={addLead} onAddContact={addContact}
+                  onLeadClick={lead=>{setSelLead(lead.id);setPage("lead");}}
+                  onDropLead={moveLead}
+                  c={c}/>
+              ))}
+            </div>
+          </div>
+        )}
+        {page==="lead"&&currentLead&&(
+          <LeadDetail
+            lead={currentLead} stages={stages}
+            leadEvents={events.filter(e=>e.leadId===currentLead.id)}
+            leadNotes={[...notes.filter(n=>n.leadId===currentLead.id)].sort((a,b)=>b.createdAt.localeCompare(a.createdAt))}
+            leadProductsList={leadProducts}
+            products={products}
+            onUpdate={updLead} onDelete={delLead} onMarkWon={markWon}
+            onAddEvent={addEv} onAddNote={addNote}
+            onDeleteEvent={delEv} onDeleteNote={delNote}
+            onAddLeadProduct={addLeadProduct} onDeleteLeadProduct={delLeadProduct}
+            onBack={()=>setPage("kanban")} c={c}/>
+        )}
+        {page==="contacts"&&<ContactsPage contacts={contacts} leads={leads} leadProductsList={leadProducts} onAdd={addContact} onDelete={delContact} onClearAll={clearContacts} c={c}/>}
+        {page==="clients"&&<ClientsPage leads={leads} leadProductsList={leadProducts} onUnwon={unwon} onUnwonAll={unwonAll} c={c}/>}
+        {page==="products"&&<ProductsPage products={products} leadProductsList={leadProducts} onAdd={addProduct} onUpdate={updProduct} onDelete={delProduct} onClearAll={clearProducts} c={c}/>}
+        {page==="settings"&&<SettingsPage stages={stages} onAdd={addStage} onUpdate={updStage} onDelete={delStage} onClearAllData={clearAllData} c={c}/>}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
