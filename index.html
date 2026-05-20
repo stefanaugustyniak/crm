@@ -22,6 +22,16 @@ input, textarea, select, button { font-family: inherit; }
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
 
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' && window.innerWidth < 768);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return isMobile;
+}
+
 // ── Storage (Supabase) ────────────────────────────────────────────────────────
 const SUPABASE_URL = "https://uokqkqcjoijhkkpsjkdo.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVva3FrcWNqb2lqaGtrcHNqa2RvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNjEyMDEsImV4cCI6MjA5NDgzNzIwMX0.fQ9KE9jdHi7vG6rD5Xwk0fmGYAhOVyj0-R1XIRVKa44";
@@ -292,8 +302,9 @@ function LeadCard({lead,stage,onClick,onDragStart,onDragEnd,c,dragging}) {
   );
 }
 
-function KanbanCol({stage,leads,contacts,draggedId,onDragStart,onDragEnd,onAdd,onAddContact,onLeadClick,onDropLead,c}) {
+function KanbanCol({stage,leads,contacts,draggedId,onDragStart,onDragEnd,onAdd,onAddContact,onLeadClick,onDropLead,isMobile,c}) {
   const [open,setOpen] = useState(false);
+  const [collapsed,setCollapsed] = useState(false);
   const [dragOver,setDragOver] = useState(false);
   const dragCounter = useRef(0);
   return (
@@ -308,17 +319,18 @@ function KanbanCol({stage,leads,contacts,draggedId,onDragStart,onDragEnd,onAdd,o
         const id = e.dataTransfer.getData("text/plain");
         if (id) onDropLead(id, stage.id);
       }}
-      style={{width:220,flexShrink:0,background:dragOver?c.colHi:c.col,borderRadius:12,padding:10,transition:"background 0.15s",border:dragOver?`2px dashed ${stage.color}`:`2px solid transparent`,boxSizing:"border-box"}}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 2px",marginBottom:8}}>
+      style={{width:isMobile?"100%":220,flexShrink:0,background:dragOver?c.colHi:c.col,borderRadius:12,padding:10,transition:"background 0.15s",border:dragOver?`2px dashed ${stage.color}`:`2px solid transparent`,boxSizing:"border-box"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 2px",marginBottom:collapsed?0:8,cursor:isMobile?"pointer":"default"}} onClick={isMobile?()=>setCollapsed(c=>!c):undefined}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
+          {isMobile && <span style={{fontSize:12,color:c.sec,transition:"transform 0.15s",display:"inline-block",transform:collapsed?"rotate(-90deg)":"rotate(0deg)"}}>&#x25BE;</span>}
           <div style={{width:7,height:7,borderRadius:4,background:stage.color}}/>
-          <span style={{fontSize:12,fontWeight:600,color:c.text}}>{stage.name}</span>
-          <span style={{fontSize:11,color:c.sec}}>{leads.length}</span>
+          <span style={{fontSize:isMobile?14:12,fontWeight:600,color:c.text}}>{stage.name}</span>
+          <span style={{fontSize:isMobile?12:11,color:c.sec}}>{leads.length}</span>
         </div>
-        <button onClick={()=>setOpen(true)} style={{background:"none",border:"none",cursor:"pointer",color:c.sec,fontSize:22,lineHeight:1,padding:"0 4px",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:6}}>+</button>
+        <button onClick={e=>{e.stopPropagation();setOpen(true);}} style={{background:"none",border:"none",cursor:"pointer",color:c.sec,fontSize:22,lineHeight:1,padding:"0 4px",width:30,height:30,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:6}}>+</button>
       </div>
       {open&&<AddLeadModal stage={stage} contacts={contacts} onAdd={onAdd} onAddContact={onAddContact} onClose={()=>setOpen(false)} c={c}/>}
-      {leads.map(lead=>(
+      {!collapsed && leads.map(lead=>(
         <LeadCard key={lead.id} lead={lead} stage={stage}
           onClick={()=>onLeadClick(lead)}
           onDragStart={e=>{e.dataTransfer.setData("text/plain",lead.id); e.dataTransfer.effectAllowed="move"; onDragStart(lead.id);}}
@@ -812,6 +824,8 @@ function App() {
   const [selLead,setSelLead] = useState(null);
   const [ready,setReady] = useState(false);
   const [draggedId,setDraggedId] = useState(null);
+  const [menuOpen,setMenuOpen] = useState(false);
+  const isMobile = useIsMobile();
   const c = dark ? DT : LT;
 
   useEffect(()=>{
@@ -912,27 +926,70 @@ function App() {
 
   return (
     <div style={{minHeight:"100vh",background:c.bg,color:c.text}}>
-      <div style={{background:c.nav,borderBottom:`0.5px solid ${c.border}`,display:"flex",alignItems:"center",padding:"0 16px",height:50,gap:2,position:"sticky",top:0,zIndex:50,backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)"}}>
-        <div style={{fontSize:15,fontWeight:700,color:c.text,marginRight:10,letterSpacing:-0.3}}>CRM</div>
-        {NAV.map(n=>(
-          <button key={n.id} onClick={()=>{setPage(n.id);if(n.id!=="kanban")setSelLead(null);}}
-            style={{padding:"5px 10px",borderRadius:8,fontSize:13,fontWeight:activeNav===n.id?500:400,cursor:"pointer",border:"none",fontFamily:"inherit",background:activeNav===n.id?c.accentBg:"transparent",color:activeNav===n.id?c.accent:c.sec,transition:"all 0.15s",display:"flex",alignItems:"center",gap:4}}>
-            {n.label}
-            {n.id==="clients"&&wonCount>0&&<span style={{background:c.green,color:"#fff",fontSize:10,fontWeight:700,padding:"1px 5px",borderRadius:10,lineHeight:1.4}}>{wonCount}</span>}
-          </button>
-        ))}
-        <div style={{flex:1}}/>
-        <button onClick={()=>setDark(d=>!d)} style={{padding:"5px 10px",borderRadius:8,border:`0.5px solid ${c.border}`,background:"transparent",cursor:"pointer",color:c.sec,fontSize:13,fontFamily:"inherit"}}>
-          {dark?"Jasny":"Ciemny"}
-        </button>
+      {/* Top bar */}
+      <div style={{background:c.nav,borderBottom:`0.5px solid ${c.border}`,display:"flex",alignItems:"center",padding:isMobile?"0 12px":"0 16px",height:50,gap:isMobile?8:2,position:"sticky",top:0,zIndex:50,backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)"}}>
+        {isMobile ? (
+          <>
+            <button onClick={()=>setMenuOpen(true)} style={{background:"none",border:"none",cursor:"pointer",color:c.text,padding:"8px 4px",display:"flex",alignItems:"center"}}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+            <div style={{fontSize:15,fontWeight:700,color:c.text,letterSpacing:-0.3}}>{page==="lead"?"Lead":TITLES[page]}</div>
+            <div style={{flex:1}}/>
+            <button onClick={()=>setDark(d=>!d)} style={{background:"none",border:"none",cursor:"pointer",color:c.sec,padding:"8px",display:"flex",alignItems:"center"}}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                {dark ? (
+                  <><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"/></>
+                ) : (
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                )}
+              </svg>
+            </button>
+          </>
+        ) : (
+          <>
+            <div style={{fontSize:15,fontWeight:700,color:c.text,marginRight:10,letterSpacing:-0.3}}>CRM</div>
+            {NAV.map(n=>(
+              <button key={n.id} onClick={()=>{setPage(n.id);if(n.id!=="kanban")setSelLead(null);}}
+                style={{padding:"5px 10px",borderRadius:8,fontSize:13,fontWeight:activeNav===n.id?500:400,cursor:"pointer",border:"none",fontFamily:"inherit",background:activeNav===n.id?c.accentBg:"transparent",color:activeNav===n.id?c.accent:c.sec,transition:"all 0.15s",display:"flex",alignItems:"center",gap:4}}>
+                {n.label}
+                {n.id==="clients"&&wonCount>0&&<span style={{background:c.green,color:"#fff",fontSize:10,fontWeight:700,padding:"1px 5px",borderRadius:10,lineHeight:1.4}}>{wonCount}</span>}
+              </button>
+            ))}
+            <div style={{flex:1}}/>
+            <button onClick={()=>setDark(d=>!d)} style={{padding:"5px 10px",borderRadius:8,border:`0.5px solid ${c.border}`,background:"transparent",cursor:"pointer",color:c.sec,fontSize:13,fontFamily:"inherit"}}>
+              {dark?"Jasny":"Ciemny"}
+            </button>
+          </>
+        )}
       </div>
+
+      {/* Mobile drawer */}
+      {isMobile && menuOpen && (
+        <div style={{position:"fixed",inset:0,zIndex:100}}>
+          <div onClick={()=>setMenuOpen(false)} style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.4)"}}/>
+          <div style={{position:"absolute",left:0,top:0,bottom:0,width:260,background:c.card,boxShadow:"4px 0 24px rgba(0,0,0,0.15)",display:"flex",flexDirection:"column"}}>
+            <div style={{padding:"20px 20px 12px",borderBottom:`0.5px solid ${c.border}`}}>
+              <div style={{fontSize:20,fontWeight:700,color:c.text,letterSpacing:-0.3}}>CRM</div>
+            </div>
+            <div style={{padding:12,display:"flex",flexDirection:"column",gap:2,flex:1}}>
+              {NAV.map(n=>(
+                <button key={n.id} onClick={()=>{setPage(n.id);if(n.id!=="kanban")setSelLead(null);setMenuOpen(false);}}
+                  style={{padding:"12px 14px",borderRadius:10,fontSize:15,fontWeight:activeNav===n.id?600:500,cursor:"pointer",border:"none",fontFamily:"inherit",background:activeNav===n.id?c.accentBg:"transparent",color:activeNav===n.id?c.accent:c.text,transition:"all 0.15s",display:"flex",alignItems:"center",justifyContent:"space-between",textAlign:"left"}}>
+                  <span>{n.label}</span>
+                  {n.id==="clients"&&wonCount>0&&<span style={{background:c.green,color:"#fff",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:10}}>{wonCount}</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {page!=="lead"&&<div style={{padding:"20px 20px 4px"}}><div style={{fontSize:24,fontWeight:700,color:c.text,letterSpacing:-0.4}}>{TITLES[page]}</div></div>}
 
       <div style={{paddingTop:12}}>
         {page==="kanban"&&(
-          <div style={{overflowX:"auto",paddingLeft:16,paddingRight:16,paddingBottom:20}}>
-            <div style={{display:"flex",gap:8,width:"max-content",minWidth:"100%"}}>
+          <div style={{overflowX:isMobile?"visible":"auto",paddingLeft:isMobile?12:16,paddingRight:isMobile?12:16,paddingBottom:20}}>
+            <div style={{display:"flex",flexDirection:isMobile?"column":"row",gap:isMobile?12:8,width:isMobile?"100%":"max-content",minWidth:"100%"}}>
               {[...stages].sort((a,b)=>a.order-b.order).map(stage=>(
                 <KanbanCol key={stage.id} stage={stage} leads={leads.filter(l=>l.stageId===stage.id)}
                   contacts={contacts}
@@ -942,6 +999,7 @@ function App() {
                   onAdd={addLead} onAddContact={addContact}
                   onLeadClick={lead=>{setSelLead(lead.id);setPage("lead");}}
                   onDropLead={moveLead}
+                  isMobile={isMobile}
                   c={c}/>
               ))}
             </div>
